@@ -1,0 +1,1112 @@
+<!--
+* Copyright (c) 2020, Ford Motor Company
+* All rights reserved.
+*
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions are met:
+*
+* Redistributions of source code must retain the above copyright notice, this
+* list of conditions and the following disclaimer.
+*
+* Redistributions in binary form must reproduce the above copyright notice,
+* this list of conditions and the following
+* disclaimer in the documentation and/or other materials provided with the
+* distribution.
+*
+* Neither the name of the Ford Motor Company nor the names of
+* its contributors may be used to endorse or promote products derived
+* from this software without specific prior written permission.
+*
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+* AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+* IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+* ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+* LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+* CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+* SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+* INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+* CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+* ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+* POSSIBILITY OF SUCH DAMAGE.
+-->
+
+<html>
+
+<head>
+    <script src='./SDL.min.js'></script>
+
+    <script type='module'>
+        import sdlManifest from './manifest.js';
+
+        class HelloSdl {
+            constructor () {
+                this._lifecycleConfig = new SDL.manager.LifecycleConfig()
+                    .loadManifest(sdlManifest)
+                    .setLanguageDesired(SDL.rpc.enums.Language.EN_US)
+                    .setHmiDisplayLanguageDesired(SDL.rpc.enums.Language.EN_US)
+                    .setTransportConfig(new SDL.transport.WebSocketClientConfig())
+                    .setRpcNotificationListeners({
+                        [SDL.rpc.enums.FunctionID.OnHMIStatus]: this._onHmiStatusListener.bind(this),
+                        [SDL.rpc.enums.FunctionID.OnSystemCapabilityUpdated]: this._onSystemCapabilityUpdatedRpcListener.bind(this),
+                    });
+
+                this._appId = this._lifecycleConfig.getAppId();
+                this._logRegularMessage('Start app');
+
+                this._appConfig = new SDL.manager.AppConfig()
+                    .setLifecycleConfig(this._lifecycleConfig);
+
+                const managerListener = new SDL.manager.SdlManagerListener();
+                managerListener
+                    .setOnStart((sdlManager) => {
+                        this._permissionManager = this._sdlManager.getPermissionManager();
+                        this._logPermissions();
+                        this._permissionManager.addListener(
+                            [
+                                new SDL.manager.permission.PermissionElement(
+                                    SDL.rpc.enums.FunctionID.SubscribeVehicleData,
+                                    [
+                                        'accPedalPosition',
+                                        'gps',
+                                        'fuelLevel',
+                                        'odometer',
+                                        'prndl',
+                                    ]
+                                ),
+                            ],
+                            SDL.manager.permission.enums.PermissionGroupType.ANY,
+                            (allowedPermissions, permissionGroupStatus) => {
+                                this._logRegularMessage('SubscribeVehicleData permissions changed!');
+                                this._logRegularMessage('Allowed Permissions: ' + allowedPermissions);
+                                this._logRegularMessage('Permission Group Status: ' + permissionGroupStatus);
+                                this._logPermissions();
+                            }
+                        );
+                        this._onConnected();
+                    })
+                    .setOnError((sdlManager, info) => {
+                        this._logMessage('APP:', 'Error from SdlManagerListener: ' + info, true);
+                    });
+
+                this._sdlManager = new SDL.manager.SdlManager(this._appConfig, managerListener);
+                this._sdlManager.start();
+
+                this._currentTemplate = 'WEB_VIEW';
+                this._isTemplateSwitchCommandAdded = false;
+                this._isButtonSubscriptionRequested = false;
+                this._templateSwitchCommandId = 1001;
+                this._speakEnabled = false;
+                this._serverIP = "192.168.1.242";
+            }
+
+            stop () {
+                this._logRegularMessage('Stop app');
+                this._sdlManager.dispose();
+            }
+
+            setCurrentTemplateName(template) {
+                this._currentTemplate = template;
+            }
+
+            async loadMessaging () {
+                const screenManager = this._sdlManager.getScreenManager();
+                /*screenManager.setVoiceCommands([
+                    new SDL.manager.screen.utils.VoiceCommand(['Option 1'], () => {
+                        console.log('Option one selected!');
+                    }),
+                    new SDL.manager.screen.utils.VoiceCommand(['Option 2'], () => {
+                        console.log('Option two selected!');
+                    }),
+                    new SDL.manager.screen.utils.VoiceCommand(['Option 3'], () => {
+                        console.log('Option three selected!');
+                    }),
+                ]);*/
+
+                // set up the presentation for the manager when its ready
+                const showMessage = async (contents, sender, id) => {
+                    console.log("Contents: ", contents)
+                    screenManager.beginTransaction();
+                    screenManager.setTextField1(contents);
+                    screenManager.setTextField2(sender);
+                    screenManager.setTextField3(id.toString());
+                    screenManager.setTextField4(localStorage.getItem("identity"));
+                    // Commit the updates and catch any errors
+                    const success = await screenManager.commit().catch(function (error) {
+                        // Handle Error
+                    });
+                    console.log('ScreenManager update complete:', success);
+                    if (success === true) {
+                        // Update complete
+                    } else {
+                        // Something went wrong
+                    }
+                }
+                screenManager.changeLayout(new SDL.rpc.structs.TemplateConfiguration()
+                                .setTemplate("MESSAGING"));
+                var history = []
+                setInterval(() => {
+                    fetch('http://'+this._serverIP+':3002/api/v1/messages?roomId=1')
+                    .then(response => {
+                        console.log(response)
+                        return response.json()
+                    })
+                    .then(async data => {
+                        console.log('Success:', data);
+                        var messagesToSend = []
+                        if (history.length === 0) {
+                            console.log("History is 0")
+                            messagesToSend = data
+                            history = data
+                        } else {
+                            // filter old messages
+                            for(const message of data) {
+                                var exists = false;
+                                for(const item of history) {
+                                    if (message.msgId === item.msgId) {
+                                        //message exists
+                                        console.log("Message exists, skipping")
+                                        exists = true
+                                    }
+                                }
+                                if (!exists) {
+                                    console.log("Pushing message: ", message)
+                                        history.push(message)
+                                        messagesToSend.push(message)
+                                }
+                            }
+                        }
+                        console.log("Sending the following messages: ", messagesToSend)
+                        for(const newMessage of messagesToSend) {
+                            console.log("Calling show message")
+                            await showMessage(newMessage.contents, newMessage.sender, newMessage.msgId)
+                        }
+                        if (messagesToSend.length > 0 && this._speakEnabled) {
+                            var lastContents = messagesToSend[messagesToSend.length-1].contents;
+                            console.log("Speaking: ", lastContents)
+                            const chunk = new SDL.rpc.structs.TTSChunk().setText(lastContents).setType(SDL.rpc.enums.SpeechCapabilities.SC_TEXT);
+                            const speak = new SDL.rpc.messages.Speak().setTtsChunks([chunk]);
+                            const response = await this._sdlManager.sendRpcResolve(speak);
+                            if (!response.getSuccess()){
+                                switch (response.getResultCode()){
+                                    case SDL.rpc.enums.Result.DISALLOWED:
+                                        console.log('The app does not have permission to use the speech request');
+                                        break;
+                                    case SDL.rpc.enums.Result.REJECTED:
+                                        console.log('The request was rejected because a higher priority request is in progress');
+                                        break;
+                                    case SDL.rpc.enums.Result.ABORTED:
+                                        console.log('The request was aborted by another higher priority request');
+                                        break;
+                                    default:
+                                        console.log('Some other error occurred');
+                                }
+                            } else {
+                                console.log('Speech was successfully spoken');
+                            }
+                        }
+                    })
+                    .catch((error) => {
+                    console.error('Error:', error);
+                    });
+
+                }, 2000) 
+            }
+
+            setIdentity(loadMessages) {
+                //present keyboard pi, load messaging after receiving identity
+                const screenManager = this._sdlManager.getScreenManager();
+                const keyboardListener = new SDL.manager.screen.choiceset.KeyboardListener()
+                    .setOnUserDidSubmitInput((inputText, event) => {
+                        console.log("!!!USER INPUT: ", inputText)
+                        switch (event) {
+                            case SDL.rpc.enums.KeyboardEvent.ENTRY_VOICE:
+                                // The user decided to start voice input, you should start an AudioPassThru session if supported
+                                break;
+                            case SDL.rpc.enums.KeyboardEvent.ENTRY_SUBMITTED:
+                                // The user submitted some text with the keyboard
+                                console.log("Input text: ", inputText);
+                                if (inputText) {
+                                    localStorage.setItem("identity", inputText);
+                                    if (loadMessages) {
+                                        this.loadMessaging();
+                                    }
+                                }
+                                break;
+                            default:
+                                break;
+                        }
+                    })
+                    .setOnKeyboardDidSendEvent((event, currentInputText) => {
+                        // This is sent upon every event, such as keypresses, cancellations, and aborting
+                        console.log("!!!Current input  text: ", currentInputText);
+                    })
+                    const cancelId = screenManager.presentKeyboard('Enter you initials', null, keyboardListener);
+            }
+
+            async _onConnected () {
+                // add voice commands for when the managers are ready
+                const screenManager = this._sdlManager.getScreenManager();
+                /*screenManager.setVoiceCommands([
+                    new SDL.manager.screen.utils.VoiceCommand(['Option 1'], () => {
+                        console.log('Option one selected!');
+                    }),
+                    new SDL.manager.screen.utils.VoiceCommand(['Option 2'], () => {
+                        console.log('Option two selected!');
+                    }),
+                    new SDL.manager.screen.utils.VoiceCommand(['Option 3'], () => {
+                        console.log('Option three selected!');
+                    }),
+                ]);*/
+
+                // set up the presentation for the manager when its ready
+                // Post to server
+
+                // Check identity
+                var identity = localStorage.getItem("identity");
+                if (identity) {
+                    console.log("Loaded identity: ", identity)
+                    this.loadMessaging();
+                } else {
+                    this.setIdentity(true);
+                }
+
+                const messageServer = (msg) => {
+                    fetch('http://'+this._serverIP+':3002/api/v1/sendmessage', {
+                        method: 'POST',
+                        headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({roomId: 1, sender: localStorage.getItem("identity"), contents: msg})
+                    })
+                }
+
+                // add menus
+                const menuListener = new SDL.manager.screen.menu.MenuSelectionListener()
+                    .setOnTriggered(triggerSource => {
+                        console.log(triggerSource);
+                    });
+                const voice1 = ['Hello Menu One'];
+
+                const subCell1 = new SDL.manager.screen.menu.MenuCell('Yes')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Yes");
+                        }));
+                
+                const subCell2 = new SDL.manager.screen.menu.MenuCell('Ok')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Ok");
+                        }));
+
+                const subCell3 = new SDL.manager.screen.menu.MenuCell('Works for me!')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Works for me!");
+                        }));
+
+                const mainCell1 = new SDL.manager.screen.menu.MenuCell('Confirmation Messages')
+                    .setSubCells([subCell1, subCell2, subCell3])
+                    ._setCellId(4);
+
+                const subCell4 = new SDL.manager.screen.menu.MenuCell('No')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("No");
+                        }));
+                
+                const subCell5 = new SDL.manager.screen.menu.MenuCell('Sorry')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Sorry");
+                        }));
+
+                const subCell6 = new SDL.manager.screen.menu.MenuCell('Maybe another time!')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Maybe another Time!");
+                        }));
+
+                const mainCell2 = new SDL.manager.screen.menu.MenuCell('Dissent Messages')
+                    .setSubCells([subCell4, subCell5, subCell6])
+                    ._setCellId(8);
+
+                const subCell7 = new SDL.manager.screen.menu.MenuCell('Be there soon!')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Be there soon!");
+                        }));
+                
+                const subCell8 = new SDL.manager.screen.menu.MenuCell('On the way!')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("On the way!");
+                        }));
+
+                const subCell9 = new SDL.manager.screen.menu.MenuCell('Sorry, running late')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Sorry, running late");
+                        }));
+
+                const mainCell3 = new SDL.manager.screen.menu.MenuCell('Travel Messages')
+                    .setSubCells([subCell7, subCell8, subCell9])
+                    ._setCellId(12);
+
+                const subCell10 = new SDL.manager.screen.menu.MenuCell("Sorry I can't talk right now")
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Sorry I can't talk right now");
+                        }));
+                
+                const subCell11 = new SDL.manager.screen.menu.MenuCell('Talk to you soon!')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Talk to you soon!");
+                        }));
+
+                const subCell12 = new SDL.manager.screen.menu.MenuCell('Call you back soon...')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            messageServer("Call you back soon...");
+                        }));
+
+                const mainCell4 = new SDL.manager.screen.menu.MenuCell('Communication Messages')
+                    .setSubCells([subCell10, subCell11, subCell12])
+                    ._setCellId(16);
+
+                const mainCell5 = new SDL.manager.screen.menu.MenuCell('Custom Message')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            const keyboardListener = new SDL.manager.screen.choiceset.KeyboardListener()
+                                .setOnUserDidSubmitInput((inputText, event) => {
+                                    console.log("!!!USER INPUT: ", inputText)
+                                    switch (event) {
+                                        case SDL.rpc.enums.KeyboardEvent.ENTRY_VOICE:
+                                            // The user decided to start voice input, you should start an AudioPassThru session if supported
+                                            break;
+                                        case SDL.rpc.enums.KeyboardEvent.ENTRY_SUBMITTED:
+                                            // The user submitted some text with the keyboard
+                                            console.log("Input text: ", inputText);
+                                            if (inputText) {
+                                                messageServer(inputText)
+                                            }
+                                            break;
+                                        default:
+                                            break;
+                                    }
+                                })
+                                .setOnKeyboardDidSendEvent((event, currentInputText) => {
+                                    // This is sent upon every event, such as keypresses, cancellations, and aborting
+                                    console.log("!!!Current input  text: ", currentInputText);
+                                })
+                                const cancelId = screenManager.presentKeyboard('Type a message', null, keyboardListener);
+                            }));
+
+                const mainCell6 = new SDL.manager.screen.menu.MenuCell('Set Identity')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            this.setIdentity(false);
+                        }));
+
+                const mainCell7 = new SDL.manager.screen.menu.MenuCell('Toggle Speak')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            this._speakEnabled = !this._speakEnabled;
+                            console.log("Speak set to: ", this._speakEnabled)
+                        }));
+
+                const mainCell8 = new SDL.manager.screen.menu.MenuCell('Configure IP')
+                    .setMenuSelectionListener(new SDL.manager.screen.menu.MenuSelectionListener()
+                        .setOnTriggered((trigger) => {
+                            const keyboardListener = new SDL.manager.screen.choiceset.KeyboardListener()
+                                .setOnUserDidSubmitInput((inputText, event) => {
+                                    console.log("!!!USER INPUT: ", inputText)
+                                    switch (event) {
+                                        case SDL.rpc.enums.KeyboardEvent.ENTRY_VOICE:
+                                            // The user decided to start voice input, you should start an AudioPassThru session if supported
+                                            break;
+                                        case SDL.rpc.enums.KeyboardEvent.ENTRY_SUBMITTED:
+                                            // The user submitted some text with the keyboard
+                                            console.log("Input text: ", inputText);
+                                            if (inputText) {
+                                                this._serverIP = inputText
+                                            }
+                                            break;
+                                        default:
+                                            break;
+                                    }
+                                })
+                                .setOnKeyboardDidSendEvent((event, currentInputText) => {
+                                    // This is sent upon every event, such as keypresses, cancellations, and aborting
+                                    console.log("!!!Current input  text: ", currentInputText);
+                                })
+                                const cancelId = screenManager.presentKeyboard('Enter IP Address', null, keyboardListener);
+                                
+                            }));
+
+                const cellList = [mainCell1, mainCell2, mainCell3, mainCell4, mainCell5, mainCell6, mainCell7, mainCell8];
+
+                screenManager.setMenu(cellList);
+
+                const textState1 = new SDL.manager.screen.utils.SoftButtonState("YES", "Yes");
+                const softButtonObject1 = new SDL.manager.screen.utils.SoftButtonObject('softButtonObject1', [textState1], textState1.getName(), function (softButtonObject, rpc) {
+                    console.log("Got yes!!!")
+                    console.log(rpc)
+                    if (rpc._functionName === "OnButtonPress") {
+                        messageServer("Yes");
+                    }
+                });
+
+                const textState2 = new SDL.manager.screen.utils.SoftButtonState("NO", "No");
+                const softButtonObject2 = new SDL.manager.screen.utils.SoftButtonObject('softButtonObject2', [textState2], textState2.getName(), function (softButtonObject, rpc) {
+                    if (rpc._functionName === "OnButtonPress") {
+                        messageServer("No");
+                    }
+                });
+
+                const textState3 = new SDL.manager.screen.utils.SoftButtonState("OMW", "On my way!");
+                const softButtonObject3 = new SDL.manager.screen.utils.SoftButtonObject('softButtonObject3', [textState3], textState3.getName(), function (softButtonObject, rpc) {
+                    if (rpc._functionName === "OnButtonPress") {
+                        messageServer("On my way!");
+                    }
+                });
+
+                const textState4 = new SDL.manager.screen.utils.SoftButtonState("CUSTOM", "Custom");
+                const softButtonObject4 = new SDL.manager.screen.utils.SoftButtonObject('softButtonObject4', [textState4], textState4.getName(), function (softButtonObject, rpc) {
+                    console.log('SoftButton pressed!');
+                    if (rpc._functionName === "OnButtonPress") {
+                        const keyboardListener = new SDL.manager.screen.choiceset.KeyboardListener()
+                        .setOnUserDidSubmitInput((inputText, event) => {
+                            console.log("!!!USER INPUT: ", inputText)
+                            switch (event) {
+                                case SDL.rpc.enums.KeyboardEvent.ENTRY_VOICE:
+                                    // The user decided to start voice input, you should start an AudioPassThru session if supported
+                                    break;
+                                case SDL.rpc.enums.KeyboardEvent.ENTRY_SUBMITTED:
+                                    // The user submitted some text with the keyboard
+                                    console.log("Input text: ", inputText);
+                                    if (inputText) {
+                                        messageServer(inputText);
+                                    }
+                                    break;
+                                default:
+                                    break;
+                            }
+                        })
+                        .setOnKeyboardDidSendEvent((event, currentInputText) => {
+                            // This is sent upon every event, such as keypresses, cancellations, and aborting
+                            console.log("!!!Current input  text: ", currentInputText);
+                        })
+                        const cancelId = screenManager.presentKeyboard('Custom message', null, keyboardListener);
+                    }
+                });
+
+                screenManager.beginTransaction();
+                screenManager.setSoftButtonObjects([softButtonObject1, softButtonObject2, softButtonObject3, softButtonObject4]);
+                // Commit the updates and catch any errors
+                const success = await screenManager.commit().catch(function (error) {
+                    // Handle Error
+                });
+                console.log('ScreenManager update complete:', success);
+                if (success === true) {
+                    // Update complete
+                } else {
+                    // Something went wrong
+                }
+            }
+
+
+            async _onSystemCapabilityUpdatedRpcListener (capabilityMessage) {
+                // just log that RPC and do nothing
+                this._logRpcResponseMessage(capabilityMessage);
+            }
+
+            async _onCommandRpcListener (onCommand) {
+                if (onCommand.getCmdID() === this._templateSwitchCommandId) {
+                    this._logRpcResponseMessage(onCommand);
+                    this._logRegularMessage('Switching to WEB_VIEW template');
+
+                    const showTemplate = new SDL.rpc.messages.Show();
+                    showTemplate.setTemplateTitle("WEB_VIEW");
+
+                    const configuration = new SDL.rpc.structs.TemplateConfiguration();
+                    configuration.setTemplate("WEB_VIEW");
+                    showTemplate.setTemplateConfiguration(configuration);
+
+                    await this.sendRpcRequest(showTemplate);
+                }
+            }
+
+            async _onHmiStatusListener (onHmiStatus) {
+                const hmiLevel = onHmiStatus.getHmiLevel();
+                this._logRpcResponseMessage(onHmiStatus);
+
+                if (onHmiStatus.getWindowID() !== SDL.rpc.enums.PredefinedWindows.DEFAULT_WINDOW) {
+                    this._logRegularMessage('Ignore OnHmiStatus for widgets');
+                    return;
+                }
+
+                const screenManager = this._sdlManager.getScreenManager();
+                        screenManager.changeLayout(new SDL.rpc.structs.TemplateConfiguration()
+                                .setTemplate("MESSAGING"));
+
+                // wait for the FULL state for more functionality
+                if (hmiLevel === SDL.rpc.enums.HMILevel.HMI_FULL) {
+                    const isRpcAllowed = (rpc) => {
+                        return this._permissionManager &&
+                            this._permissionManager.isRpcAllowed(rpc);
+                    };
+
+                    /*if (!this._isButtonSubscriptionRequested && isRpcAllowed(SDL.rpc.enums.FunctionID.SubscribeButton)) {
+                        const availableButtons = this._sdlManager.getRegisterAppInterfaceResponse().getButtonCapabilities().map(function (capability) {
+                            return capability.getNameParam();
+                        });
+
+                        // add button listeners
+                        const screenManager = this._sdlManager.getScreenManager();
+                        const ButtonName = SDL.rpc.enums.ButtonName;
+                        const buttonNames = [ButtonName.PRESET_0, ButtonName.PRESET_1, ButtonName.PRESET_2, ButtonName.PRESET_3,
+                                    ButtonName.PRESET_4, ButtonName.PRESET_5, ButtonName.PRESET_6, ButtonName.PRESET_7, ButtonName.PRESET_8,
+                                    ButtonName.PRESET_9, ButtonName.PLAY_PAUSE, ButtonName.OK, ButtonName.SEEKLEFT, ButtonName.SEEKRIGHT,
+                                    ButtonName.TUNEUP, ButtonName.TUNEDOWN];
+
+                        for (const buttonName of buttonNames) {
+                            if (availableButtons.indexOf(buttonName) !== -1) {
+                                console.log('Subscribing to', buttonName);
+                                await screenManager.addButtonListener(buttonName, this._onButtonListener.bind(this)).catch(function (err) {
+                                    console.error(err);
+                                });
+                            } else {
+                                console.log('No capability found for button', buttonName);
+                            }
+                        }
+
+                        this._isButtonSubscriptionRequested = true;
+                    }*/
+
+                    if (!this._isTemplateSwitchCommandAdded && isRpcAllowed(SDL.rpc.enums.FunctionID.AddCommand)) {
+                        this._logRegularMessage('Adding return to WEB_VIEW template command');
+                        this._isTemplateSwitchCommandAdded = true;
+
+                        const menuParams = new SDL.rpc.structs.MenuParams();
+                        menuParams
+                            .setMenuName("Return to WEB_VIEW")
+                            .setPosition(100)
+                            .setParentID(0);
+
+                        const addCommand = new SDL.rpc.messages.AddCommand();
+                        addCommand
+                            .setCmdID(this._templateSwitchCommandId)
+                            .setMenuParams(menuParams);
+
+                        await this.sendRpcRequest(addCommand);
+
+                        this._sdlManager.addRpcListener(SDL.rpc.enums.FunctionID.OnCommand, this._onCommandRpcListener.bind(this));
+                    }
+
+                    if (['WEB_VIEW', 'DEFAULT'].includes(this._currentTemplate)) {
+                        this._logRegularMessage('Do nothing for a default WEB_VIEW template');
+                        return;
+                    }
+                }
+
+                if (this._hmiLevel === hmiLevel) {
+                    this._logRegularMessage('Ignore OnHmiStatus if hmi level has not changed');
+                    return;
+                }
+
+                this._hmiLevel = hmiLevel;
+            }
+
+            async _sleep (timeout = 1000) {
+                return new Promise((resolve) => {
+                    setTimeout(resolve, timeout);
+                });
+            }
+
+            _onButtonListener (buttonName, onButton) {
+                if (onButton instanceof SDL.rpc.messages.OnButtonPress) {
+                    this._sdlManager.getScreenManager().setTextField1(`${buttonName} pressed`);
+                } else if (onButton instanceof SDL.rpc.messages.OnButtonEvent) {
+                    this._sdlManager.getScreenManager().setTextField2(`${buttonName} ${onButton.getButtonEventMode()}`);
+                }
+            }
+
+            async sendRpcRequest(request) {
+                this._logRpcRequestMessage(request);
+                const response = await this._sdlManager.sendRpcResolve(request);
+                this._logRpcResponseMessage(response);
+                return Promise.resolve();
+            }
+
+            _logRpcRequestMessage(message) {
+                this._logRpcMessage(`APP[${this._appId}] -> SDL`, message);
+            }
+
+            _logRpcResponseMessage(message) {
+                this._logRpcMessage(`SDL -> APP[${this._appId}]`, message);
+            }
+
+            _logRegularMessage(message) {
+                this._logMessage(`APP[${this._appId}]:`, message);
+            }
+
+            _logRpcMessage(prefix, message) {
+                const paramify = function (rpcStruct) {
+                    if (rpcStruct instanceof SDL.rpc.RpcStruct) {
+                        const params = rpcStruct.getParameters();
+                        Object.keys(params).forEach((key) => {
+                            if (Array.isArray(params[key])) { // could be an array of structs
+                                for (let index = 0; index < params[key].length; index++) {
+                                    params[key][index] = paramify(params[key][index]);
+                                }
+                            } else { // not an array. handle normally
+                                params[key] = paramify(params[key]);
+                            }
+                        });
+                        return params;
+                    }
+
+                    if (Array.isArray(rpcStruct)) { // could be an array of structs
+                        for (let index = 0; index < rpcStruct.length; index++) {
+                            rpcStruct[index] = paramify(rpcStruct[index]);
+                        }
+                        return rpcStruct;
+                    }
+
+                    if (rpcStruct instanceof Object) { // could be an object with nested structs
+                        Object.keys(rpcStruct).forEach((key) => {
+                            rpcStruct[key] = paramify(rpcStruct[key]);
+                        });
+                    }
+
+                    return rpcStruct; // leave it alone
+                }
+
+                const msgType = SDL.rpc.enums.MessageType.keyForValue(message.getMessageType());
+                this._logMessage(prefix, `Rpc: "${message.getFunctionId()}" Type: "${msgType}" Params: ${JSON.stringify(paramify(message))}`);
+            }
+
+            _logMessage(prefix, message, isError = false) {
+                const _getTime = function() {
+                    const logTime = new Date();
+                    return logTime.getHours() + ':'
+                        + logTime.getMinutes() + ':'
+                        + logTime.getSeconds() + ':'
+                        + logTime.getMilliseconds();
+                }
+
+                if (isError) {
+                    console.error(`${prefix} [${_getTime()}]: ${message}`);
+                    return;
+                }
+
+                console.log(`${prefix} [${_getTime()}]: ${message}`);
+            }
+
+            _logPermissions () {
+                if (this._permissionManager) {
+                    this._logRegularMessage(`Show RPC allowed: ${this._permissionManager.isRpcAllowed(SDL.rpc.enums.FunctionID.Show)}`);
+                    this._logRegularMessage(`PutFile RPC allowed: ${this._permissionManager.isRpcAllowed(SDL.rpc.enums.FunctionID.PutFile)}`);
+                    this._logRegularMessage(`GetVehicleData RPC allowed: ${this._permissionManager.isRpcAllowed(SDL.rpc.enums.FunctionID.GetVehicleData)}`);
+                    this._logRegularMessage(`SubscribeVehicleData RPC allowed: ${this._permissionManager.isRpcAllowed(SDL.rpc.enums.FunctionID.SubscribeVehicleData)}`);
+                }
+            }
+
+        }
+
+        const app = new HelloSdl();
+
+        let cmdCounter = 0;
+        document.getElementById("addButton").addEventListener("click", function(){
+            cmdCounter++;
+
+            const menuParams = new SDL.rpc.structs.MenuParams();
+            menuParams.setMenuName("Test item " + cmdCounter)
+                .setPosition(cmdCounter)
+                .setParentID(0);
+
+            const addCommand = new SDL.rpc.messages.AddCommand();
+            addCommand.setCmdID(cmdCounter)
+                .setMenuParams(menuParams);
+
+            app.sendRpcRequest(addCommand);
+        });
+
+        document.getElementById("delButton").addEventListener("click", function(){
+            if (cmdCounter === 0) {
+                return;
+            }
+            const deleteCommand = new SDL.rpc.messages.DeleteCommand();
+            deleteCommand.setCmdID(cmdCounter);
+
+            app.sendRpcRequest(deleteCommand);
+            cmdCounter--;
+        });
+
+        document.getElementById("alertButton").addEventListener("click", function(){
+            const alertView = new SDL.manager.screen.utils.AlertView();
+            alertView.setText("Test Alert")
+                 .setTimeout(5000);
+
+            const alertState = new SDL.manager.screen.utils.SoftButtonState('REROUTE', 'reroute', null)
+                .setSystemAction(SDL.rpc.enums.SystemAction.DEFAULT_ACTION);
+            const btn1 = new SDL.manager.screen.utils.SoftButtonObject('ReRoute', [alertState], 'REROUTE', async (id, rpc) => {
+                if (rpc instanceof SDL.rpc.messages.OnButtonPress) {
+                    // Handle OnButtonPress
+                }
+            });
+
+            const alertState2 = new SDL.manager.screen.utils.SoftButtonState('CLOSE', 'close', null)
+                .setSystemAction(SDL.rpc.enums.SystemAction.DEFAULT_ACTION);
+            const btn2 = new SDL.manager.screen.utils.SoftButtonObject('Close', [alertState2], 'CLOSE', async (id, rpc) => {
+                if (rpc instanceof SDL.rpc.messages.OnButtonPress) {
+                    // Handle OnButtonPress
+                }
+            });
+
+            alertView.setSoftButtons([btn1, btn2])
+
+            const alertCompletionListener = new SDL.manager.screen.utils.AlertCompletionListener()
+                .setOnComplete((success, tryAgainTime) => {
+                    // Handle Alert presented
+                })
+            app._sdlManager.getScreenManager().presentAlert(alertView, alertCompletionListener);
+        });
+
+        document.getElementById("unregButton").addEventListener("click", async function(){
+            // tear down the app
+            await app.sendRpcRequest(new SDL.rpc.messages.UnregisterAppInterface());
+
+            app.stop();
+        });
+
+        let widgetCounter = 1;
+        document.getElementById("addWidget").addEventListener("click", function(){
+            const createWindow = new SDL.rpc.messages.CreateWindow();
+            createWindow.setWindowID(widgetCounter)
+                         .setWindowName("Test widget " + widgetCounter)
+                         .setType(SDL.rpc.enums.WindowType.WIDGET);
+
+            if (document.getElementById("DuplicateMainWindow").checked) {
+                createWindow.setDuplicateUpdatesFromWindowID(0);
+            }
+
+            let option = document.createElement("option");
+            option.text = "Widget " + widgetCounter;
+            option.value = widgetCounter;
+            document.getElementById("LayoutWindowId").appendChild(option);
+
+            widgetCounter++;
+
+            app.sendRpcRequest(createWindow);
+        });
+
+        document.getElementById("delWidget").addEventListener("click", function(){
+            if (widgetCounter === 1) {
+                return;
+            }
+
+            let LayoutWindowId = document.getElementById("LayoutWindowId");
+            LayoutWindowId.removeChild(LayoutWindowId.lastElementChild);
+            LayoutWindowId.dispatchEvent(new Event('change'));
+            widgetCounter--;
+
+            const deleteWindow = new SDL.rpc.messages.DeleteWindow();
+            deleteWindow.setWindowID(widgetCounter);
+
+            app.sendRpcRequest(deleteWindow);
+        });
+
+        document.getElementById("setLayout").addEventListener("click", function(){
+            const showTemplate = new SDL.rpc.messages.Show();
+
+            const windowId = document.getElementById("LayoutWindowId").value;
+            if (windowId !== "MAIN") {
+                showTemplate.setWindowID(parseInt(windowId));
+            }
+
+            const templateName = document.getElementById("LayoutCombo").value;
+            showTemplate.setTemplateTitle(templateName);
+
+            const configuration = new SDL.rpc.structs.TemplateConfiguration();
+            configuration.setTemplate(templateName);
+            showTemplate.setTemplateConfiguration(configuration);
+
+            app.setCurrentTemplateName(templateName);
+            app.sendRpcRequest(showTemplate);
+        });
+
+        document.getElementById("LayoutWindowId").addEventListener('change', (event) => {
+            const items = event.target.value === "MAIN" ?
+                ["DEFAULT", "MEDIA", "NON-MEDIA", "NAV_FULLSCREEN_MAP", "WEB_VIEW"] :
+                ["TEXT_WITH_GRAPHIC", "BUTTONS_WITH_GRAPHIC", "GRAPHIC_WITH_TEXT"];
+
+            var content = "";
+            for (let item of items) {
+                content += "<option>" + item + "</option>";
+            }
+
+            document.getElementById("LayoutCombo").innerHTML = content;
+        });
+
+        // refresh items in layouts combobox
+        document.getElementById("LayoutWindowId").dispatchEvent(new Event('change'));
+
+        document.getElementById("sendShow").addEventListener("click", function(){
+            const showTemplate = new SDL.rpc.messages.Show();
+
+            const windowId = document.getElementById("LayoutWindowId").value;
+            if (windowId !== "MAIN") {
+                showTemplate.setWindowID(parseInt(windowId));
+            }
+
+            const field1Enabled = document.getElementById('sendField1').checked;
+            if (field1Enabled) {
+                const mainField1 = document.getElementById('mainField1').value;
+                showTemplate.setMainField1(mainField1);
+            }
+
+            const field2Enabled = document.getElementById('sendField2').checked;
+            if (field2Enabled) {
+                const mainField2 = document.getElementById('mainField2').value;
+                showTemplate.setMainField2(mainField2);
+            }
+
+            const softBtnEnabled = document.getElementById('sendSoftButtons').checked;
+            if (softBtnEnabled) {
+                const btnsCount = parseInt(document.getElementById('SoftButtonsCount').value);
+                let softButtons = [];
+                for (let i = 0; i < btnsCount; ++i) {
+                    const softButton = new SDL.rpc.structs.SoftButton();
+                    softButton
+                        .setSoftButtonID(i)
+                        .setType(SDL.rpc.enums.SoftButtonType.SBT_TEXT)
+                        .setText(String(i + 1));
+                    softButtons.push(softButton);
+                }
+
+                showTemplate.setSoftButtons(softButtons);
+            }
+
+            app.sendRpcRequest(showTemplate);
+        });
+
+        document.getElementById("showAppMenu").addEventListener("click", function(){
+            const showAppMenu = new SDL.rpc.messages.ShowAppMenu();
+
+            app.sendRpcRequest(showAppMenu);
+        });
+
+        document.getElementById("scrollableMessage").addEventListener("click", function(){
+            const scrollable = new SDL.rpc.messages.ScrollableMessage();
+            scrollable.setScrollableMessageBody("This is a long long message test");
+
+            const btn1 = new SDL.rpc.structs.SoftButton();
+            btn1.setSystemAction(SDL.rpc.enums.SystemAction.DEFAULT_ACTION)
+                .setType(SDL.rpc.enums.SoftButtonType.SBT_TEXT)
+                .setText("ReRoute")
+                .setSoftButtonID(5504);
+
+            const btn2 = new SDL.rpc.structs.SoftButton();
+            btn2.setSystemAction(SDL.rpc.enums.SystemAction.DEFAULT_ACTION)
+                .setType(SDL.rpc.enums.SoftButtonType.SBT_TEXT)
+                .setText("Close")
+                .setSoftButtonID(5505);
+
+            scrollable.setSoftButtons([btn1, btn2]);
+
+            app.sendRpcRequest(scrollable);
+        });
+
+        document.getElementById("sliderButton").addEventListener("click", function(){
+            const slider = new SDL.rpc.messages.Slider();
+            slider.setNumTicks(3)
+                  .setPosition(1)
+                  .setSliderHeader("This is a slider header")
+                  .setSliderFooter(["This is a slider footer", "And new line", "And one more"]);
+
+            app.sendRpcRequest(slider);
+        });
+
+        document.getElementById("performInteraction").addEventListener("click", async function(){
+            const choiceSetId = 1;
+
+            const _getCreateChoiceRequest = function() {
+                const choiceSet = new SDL.rpc.messages.CreateInteractionChoiceSet();
+
+                const choiceItem1 = new SDL.rpc.structs.Choice();
+                choiceItem1.setChoiceID(10)
+                            .setMenuName("Menu Name 1");
+
+                const choiceItem2 = new SDL.rpc.structs.Choice();
+                choiceItem2.setChoiceID(11)
+                            .setMenuName("Menu Name 2");
+
+                choiceSet.setInteractionChoiceSetID(choiceSetId);
+                choiceSet.setChoiceSet([choiceItem1, choiceItem2]);
+
+                return choiceSet;
+            };
+
+            const _getPiRequest = function() {
+                const piRequest = new SDL.rpc.messages.PerformInteraction();
+
+                piRequest.setInitialText("Initial text")
+                          .setInteractionMode(SDL.rpc.enums.InteractionMode.MANUAL_ONLY)
+                          .setInteractionChoiceSetIDList([choiceSetId]);
+
+                return piRequest;
+            };
+
+            const _getDelChoiceRequest = function() {
+                const delRequest = new SDL.rpc.messages.DeleteInteractionChoiceSet();
+                delRequest.setInteractionChoiceSetID(choiceSetId);
+
+                return delRequest;
+            }
+
+            await app.sendRpcRequest(_getCreateChoiceRequest());
+            await app.sendRpcRequest(_getPiRequest())
+            await app._sleep(10000);
+            await app.sendRpcRequest(_getDelChoiceRequest())
+        });
+
+        document.getElementById("sendField1").addEventListener("change", function(){
+            document.getElementById("mainField1").disabled = !this.checked;
+        });
+
+        document.getElementById("sendField2").addEventListener("change", function(){
+            document.getElementById("mainField2").disabled = !this.checked;
+        });
+
+        document.getElementById("sendSoftButtons").addEventListener("change", function(){
+            document.getElementById("SoftButtonsCount").disabled = !this.checked;
+        });
+
+        document.getElementById("closeApplication").addEventListener("click", function(){
+            const closeApplication = new SDL.rpc.messages.CloseApplication();
+
+            app.sendRpcRequest(closeApplication);
+        });
+
+    </script>
+</head>
+
+
+<body>
+    <marquee direction="down" width="100%" height="100%" behavior="alternate" style="color: lime;">
+        <marquee behavior="alternate">
+            WebEngine App Testing
+        </marquee>
+    </marquee>
+    <button id="addButton" style="
+        cursor: pointer;
+        position: absolute;
+        top: 5px;
+        left: 5px;">Add command
+    </button>
+    <button id="delButton" style="
+        cursor: pointer;
+        position: absolute;
+        top: 30px;
+        left: 5px;">Delete command
+    </button>
+    <button id="alertButton" style="
+        cursor: pointer;
+        position: absolute;
+        top: 55px;
+        left: 5px;">Alert command
+    </button>
+    <button id="setLayout" style="
+        cursor: pointer;
+        position: absolute;
+        top: 80px;
+        left: 5px;">Set layout
+    </button>
+    <select style="position: absolute; top: 80px; left: 100px; width: 80px;"  id="LayoutWindowId">
+        <option selected="">MAIN</option>
+    </select>
+    <select style="position: absolute; top: 80px; left: 185px; width: 185px;" id="LayoutCombo">
+    </select>
+    <button id="sendShow" style="
+        cursor: pointer;
+        position: absolute;
+        top: 105px;
+        left: 5px;">Send show
+    </button>
+    <input type="checkbox" id="sendField1" checked="true" style="position: absolute; top: 106px; left: 100px;">
+    <input style="position: absolute; top: 105px; left: 122px; width: 75px;" id="mainField1" placeholder="Field 1">
+    <input type="checkbox" id="sendField2" checked="true" style="position: absolute; top: 106px; left: 200px;">
+    <input style="position: absolute; top: 105px; left: 223px; width: 75px;" id="mainField2" placeholder="Field 2">
+    <input type="checkbox" id="sendSoftButtons" checked="true" style="position: absolute; top: 106px; left: 300px;">
+    <label style="position: absolute; top: 108px; left: 318px; width: 51px; font-size: 14px; text-align: center; color: white;">
+        Buttons:
+    </label>
+    <select style="position: absolute; top: 105px; left: 370px; width: 50px;" id="SoftButtonsCount">
+        <option>0</option>
+        <option>1</option>
+        <option>2</option>
+        <option>3</option>
+        <option>4</option>
+    </select>
+    <button id="addWidget" style="
+        cursor: pointer;
+        position: absolute;
+        top: 130px;
+        left: 5px;">Add Widget
+    </button>
+    <input type="checkbox" id="DuplicateMainWindow" style="position: absolute; top: 131px; left: 100px;">
+    <label for="DuplicateMainWindow" style="position: absolute; top: 132px; left: 123px; font-size: 15px; color: white;">
+        Duplicate MAIN window
+    </label>
+    <button id="delWidget" style="
+        cursor: pointer;
+        position: absolute;
+        top: 155px;
+        left: 5px;">Del Widget
+    </button>
+    <button id="showAppMenu" style="
+        cursor: pointer;
+        position: absolute;
+        top: 180px;
+        left: 5px;">Show menu
+    </button>
+    <button id="scrollableMessage" style="
+        cursor: pointer;
+        position: absolute;
+        top: 180px;
+        left: 100px;
+        ">ScrollableMessage
+    </button>
+    <button id="sliderButton" style="
+        cursor: pointer;
+        position: absolute;
+        top: 180px;
+        left: 237px;
+        ">Slider
+    </button>
+    <button id="performInteraction" style="
+        cursor: pointer;
+        position: absolute;
+        top: 180px;
+        left: 295px;
+        ">PerformInteraction
+    </button>
+    <button id="closeApplication" style="
+        cursor: pointer;
+        position: absolute;
+        top: 205px;
+        left: 5px;">Close app
+    </button>
+    <button id="unregButton" style="
+        cursor: pointer;
+        position: absolute;
+        top: 230px;
+        left: 5px;">Unregister
+    </button>
+</body>
+
+</html>
