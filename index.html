@@ -96,7 +96,13 @@
                 this._isButtonSubscriptionRequested = false;
                 this._templateSwitchCommandId = 1001;
                 this._speakEnabled = false;
-                this._serverIP = "192.168.1.242";
+                var lsServerIP = localStorage.getItem("serverIP");
+                if (lsServerIP) {
+                    console.log("Loaded identity: ", identity)
+                    this._serverIP = lsServerIP
+                } else {
+                    this._serverIP = "192.168.1.242"
+                }
             }
 
             stop () {
@@ -432,6 +438,7 @@
                                             console.log("Input text: ", inputText);
                                             if (inputText) {
                                                 this._serverIP = inputText
+                                                localStorage.setItem("serverIP", inputText);
                                             }
                                             break;
                                         default:
