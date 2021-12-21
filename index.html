@@ -98,7 +98,7 @@
                 this._speakEnabled = false;
                 var lsServerIP = localStorage.getItem("serverIP");
                 if (lsServerIP) {
-                    console.log("Loaded identity: ", identity)
+                    console.log("Loaded server: ", lsServerIP)
                     this._serverIP = lsServerIP
                 } else {
                     this._serverIP = "192.168.1.242"
